@@ -4,10 +4,11 @@ use termion::raw::{IntoRawMode, RawTerminal};
 use termion::screen::AlternateScreen;
 use termion::event::Key;
 use termion::input::{TermRead, Keys};
-use termion::{clear, cursor};
+use termion::{clear, cursor, color, style};
 use termion::terminal_size;
+use std::fs::File;
 
-use std::io::{Write, stdout, stdin, stderr, Stdout, Stdin};
+use std::io::{Write, stdout, stdin, stderr, Stdout, Stdin, BufReader, BufRead};
 use std::error::Error;
 use std::process;
 // use std::{thread, time};
@@ -61,14 +62,13 @@ impl Row {
 }
 
 struct Editor {
-    cx: u32,
-    cy: u32,
+    cx: u16,
+    cy: u16,
     rx: u32,
-    rowoff: i32,
-    coloff: i32,
+    rowoff: u32,
+    coloff: u32,
     screenrows: u16,
     screencols: u16,
-    numrows: i32,
     erow: Vec<Row>,
     screen: AlternateScreen<RawTerminal<Stdout>>,
     stdin: Keys<Stdin>,
@@ -87,10 +87,20 @@ impl Editor {
             coloff:0,
             screenrows,
             screencols,
-            numrows:0,
             erow:Vec::new(),
             screen,
             stdin:stdin().keys(),
+        }
+    }
+
+    fn read_file(&mut self, mut filename: &str) {
+        let file = File::open(filename).unwrap();
+        let mut buf_reader = BufReader::new(file);
+
+        let lines = buf_reader.lines();
+        for line in lines {
+            let line = line.unwrap();
+            self.erow.push(Row::new(line));
         }
     }
 
@@ -109,30 +119,53 @@ impl Editor {
         self.screen.flush().unwrap();
     }
 
+    fn statusbar(&mut self, mut buffer: String) -> String {
+        buffer.push_str(format!("{}", style::Invert).as_str());
+        let status = "[No Name]";
+        let status_size = status.len();
+
+        buffer.push_str(status);
+        for _ in 0..self.screencols-status_size as u16 {
+            buffer.push(' ');
+        }
+        buffer.push_str(format!("{}", style::NoInvert).as_str());
+        buffer
+    }
+
     fn refresh(&mut self) {
         let mut buffer = String::new();
         writeln!(stderr(), "test").unwrap();
-        for y in 0..self.screenrows {
-            if self.numrows == 0 && y == self.screenrows / 3 {
-                let welcome = "Kilo editor for Rust -- version 0.0.1";
-                let welcome_len = welcome.len() as u16;
-                writeln!(stderr(), "{}, {}", self.screencols, welcome_len);
-                let mut padding = (self.screencols - welcome_len) / 2;
-                if padding > 0 {
+        for y in 0..self.screenrows-1 {
+            let file_row = y as u32 + self.rowoff;
+            if file_row >= self.erow.len() as u32 {
+                if self.erow.len() == 0 && y == self.screenrows / 3 {
+                    let welcome = "Kilo editor for Rust -- version 0.0.1";
+                    let welcome_len = welcome.len() as u16;
+                    writeln!(stderr(), "{}, {}", self.screencols, welcome_len);
+                    let mut padding = (self.screencols - welcome_len) / 2;
+                    if padding > 0 {
+                        buffer.push('~');
+                        padding -= 1;
+                    }
+                    for _ in 0..padding {
+                        buffer.push(' ');
+                    }
+                    buffer.push_str(welcome);
+                } else {
+                    buffer.push_str(format!("{}", style::Bold).as_str());
                     buffer.push('~');
-                    padding -= 1;
+                    buffer.push_str(format!("{}", style::Reset).as_str());
                 }
-                for _ in 0..padding {
-                    buffer.push(' ');
-                }
-                buffer.push_str(welcome);
             } else {
-                buffer.push('~');
+                buffer.push_str(self.erow[file_row as usize].render.as_str());
             }
             buffer.push_str("\r\n");
         }
         self.clear();
+        buffer = self.statusbar(buffer);
+        buffer.push_str(format!("{}", cursor::Goto(self.cx+1, self.cy+1)).as_str());
         self.write(buffer.as_str());
+        // eprintln!("cursor: {}, {}", self.cx, self.cy);
     }
 
     fn process_keypress(&mut self) -> Result<i32, i32> {
@@ -140,10 +173,22 @@ impl Editor {
         match c {
             Key::Ctrl('q') => return Err(1),
             Key::Char(ch) => self.write_char(ch),
+            Key::Up | Key::Down | Key::Left | Key::Right => self.move_cursor(c),
             _ => {}
         }
         return Ok(0)
     }
+
+    fn move_cursor(&mut self, key: Key) {
+        match key {
+            Key::Down => self.cy += if self.cy < self.screenrows-2 {1} else {0},
+            Key::Up => self.cy -= if self.cy > 0 {1} else {0},
+            Key::Right => self.cx += if self.cx < self.screencols-1 {1} else {0},
+            Key::Left => self.cx -= if self.cx > 0 {1} else {0},
+            _ => panic!("only call with cursor keys")
+        }
+    }
+
 }
 
 fn init_editor() {
@@ -151,6 +196,7 @@ fn init_editor() {
     let mut ret = Ok(1);
     {
         let mut editor = Editor::new();
+        editor.read_file("Cargo.toml");
         editor.clear();
         editor.write("Hey there, how are you");
         while let Ok(_) = ret {
