@@ -10,9 +10,10 @@ use std::fs::File;
 
 use std::io::{Write, stdout, stdin, stderr, Stdout, Stdin, BufReader, BufRead};
 use std::error::Error;
-use std::process;
+use std::{process, env};
+use std::time::SystemTime;
 // use std::{thread, time};
-
+const KILO_TAB_STOP:usize = 8;
 struct Row {
     chars: String,
     render: String,
@@ -44,7 +45,7 @@ impl Row {
             if character == '\t' {
                 self.render.push(' ');
                 idx += 1;
-                while idx % 8 != 0 {
+                while idx % KILO_TAB_STOP != 0 {
                     self.render.push(' ');
                     idx += 1;
                 }
@@ -62,14 +63,17 @@ impl Row {
 }
 
 struct Editor {
-    cx: u16,
-    cy: u16,
-    rx: u32,
-    rowoff: u32,
-    coloff: u32,
+    cx: usize,
+    cy: usize,
+    rx: usize,
+    rowoff: usize,
+    coloff: usize,
     screenrows: u16,
     screencols: u16,
-    erow: Vec<Row>,
+    rows: Vec<Row>,
+    dirty: bool,
+    filename: Option<String>,
+    status_message: Option<(String, SystemTime)>,
     screen: AlternateScreen<RawTerminal<Stdout>>,
     stdin: Keys<Stdin>,
 }
@@ -85,22 +89,26 @@ impl Editor {
             rx:0,
             rowoff:0,
             coloff:0,
-            screenrows,
+            screenrows:screenrows-2,
             screencols,
-            erow:Vec::new(),
+            rows:Vec::new(),
             screen,
+            dirty:false,
+            filename:None,
+            status_message: None,
             stdin:stdin().keys(),
         }
     }
 
-    fn read_file(&mut self, mut filename: &str) {
-        let file = File::open(filename).unwrap();
+    fn read_file(&mut self, filename: String) {
+        self.filename = Some(filename.clone());
+        let file = File::open(&filename).unwrap();
         let mut buf_reader = BufReader::new(file);
 
         let lines = buf_reader.lines();
         for line in lines {
             let line = line.unwrap();
-            self.erow.push(Row::new(line));
+            self.rows.push(Row::new(line));
         }
     }
 
@@ -121,27 +129,50 @@ impl Editor {
 
     fn statusbar(&mut self, mut buffer: String) -> String {
         buffer.push_str(format!("{}", style::Invert).as_str());
-        let status = "[No Name]";
-        let status_size = status.len();
+        let filename = self.filename.clone().unwrap_or("[None]".to_string());
+        let status = format!(" {} - {} lines", filename, self.rows.len());
+        let rstatus = format!("{}/{} ", self.cy+1, self.rows.len());
+        let mut status_size = status.len();
+        let rstatus_size = rstatus.len();
+        status_size = if status_size as u16 > self.screencols {self.screencols as usize} else {status_size};
+        buffer = buffer + &status[..status_size];
 
-        buffer.push_str(status);
-        for _ in 0..self.screencols-status_size as u16 {
+        for _ in 0..self.screencols as i16-status_size as i16 - rstatus_size as i16 {
             buffer.push(' ');
         }
-        buffer.push_str(format!("{}", style::NoInvert).as_str());
+        if self.screencols as i16 - status_size as i16 - rstatus_size as i16 >= 0 {
+            buffer = buffer + &rstatus;
+        }
+        buffer.push_str(format!("{}\r\n", style::NoInvert).as_str());
         buffer
+    }
+
+    fn message_bar(&mut self, mut buffer: String) -> String {
+        if self.status_message.is_some() {
+            let (message, time) = self.status_message.clone().unwrap();
+            let mut message_len = message.len();
+            message_len = if message_len > self.screencols as usize {self.screencols as usize} else {message_len};
+            match time.elapsed() {
+                Ok(elapsed) if elapsed.as_secs() < 5 => buffer + &message,
+                Ok(_) | Err(_) => buffer
+            }
+        } else {
+            buffer
+        }
+    }
+
+    fn set_status_message(&mut self, message: String) {
+        self.status_message = Some((message, SystemTime::now()));
     }
 
     fn refresh(&mut self) {
         let mut buffer = String::new();
-        writeln!(stderr(), "test").unwrap();
-        for y in 0..self.screenrows-1 {
-            let file_row = y as u32 + self.rowoff;
-            if file_row >= self.erow.len() as u32 {
-                if self.erow.len() == 0 && y == self.screenrows / 3 {
+        for y in 0..self.screenrows as usize {
+            let file_row = y + self.rowoff;
+            if file_row >= self.rows.len() {
+                if self.rows.len() == 0 && y == self.screenrows as usize / 3 {
                     let welcome = "Kilo editor for Rust -- version 0.0.1";
                     let welcome_len = welcome.len() as u16;
-                    writeln!(stderr(), "{}, {}", self.screencols, welcome_len);
                     let mut padding = (self.screencols - welcome_len) / 2;
                     if padding > 0 {
                         buffer.push('~');
@@ -157,13 +188,30 @@ impl Editor {
                     buffer.push_str(format!("{}", style::Reset).as_str());
                 }
             } else {
-                buffer.push_str(self.erow[file_row as usize].render.as_str());
+                let mut len =
+                    if self.rows[file_row as usize].chars.len() < self.coloff as usize {
+                        0
+                    } else {
+                        self.rows[file_row as usize].chars.len() - self.coloff as usize
+                    };
+                // let mut len = self.erow[file_row as usize].chars.len() - self.coloff;
+                // if len < 0 {len = 0}
+                if len > self.screencols as usize {len = self.screencols as usize}
+                eprintln!("coloff: {}, len: {}", self.coloff, len);
+                if len > 0 {
+                    let render = &self.rows[file_row as usize]
+                        .render[self.coloff as usize..(self.coloff as usize + len) as usize];
+                    buffer.push_str(render);
+                }
             }
             buffer.push_str("\r\n");
         }
         self.clear();
         buffer = self.statusbar(buffer);
-        buffer.push_str(format!("{}", cursor::Goto(self.cx+1, self.cy+1)).as_str());
+        buffer = self.message_bar(buffer);
+        buffer.push_str(
+            format!("{}", cursor::Goto(
+                (self.rx - self.coloff + 1) as u16, (self.cy-self.rowoff+1) as u16)).as_str());
         self.write(buffer.as_str());
         // eprintln!("cursor: {}, {}", self.cx, self.cy);
     }
@@ -179,26 +227,84 @@ impl Editor {
         return Ok(0)
     }
 
+    fn row_cx_to_rx(&mut self, row: usize, cx: usize) -> usize {
+        let mut rx = 0;
+        self.rows[row].chars.chars();
+        for j in self.rows[row].chars.chars().take(self.cx) {
+            if j == '\t' {
+                rx += (KILO_TAB_STOP - 1) - (rx % KILO_TAB_STOP);
+            }
+            rx += 1;
+        }
+        return rx;
+    }
+
     fn move_cursor(&mut self, key: Key) {
-        match key {
-            Key::Down => self.cy += if self.cy < self.screenrows-2 {1} else {0},
-            Key::Up => self.cy -= if self.cy > 0 {1} else {0},
-            Key::Right => self.cx += if self.cx < self.screencols-1 {1} else {0},
-            Key::Left => self.cx -= if self.cx > 0 {1} else {0},
-            _ => panic!("only call with cursor keys")
+        // let mut rowInput = None;
+        {
+            let row = if self.cy >= self.rows.len() {
+                None
+            } else {
+                Some(self.rows[self.cy].render.as_str())
+            };
+
+            match key {
+                Key::Down => self.cy += if self.cy < self.rows.len() { 1 } else { 0 },
+                Key::Up => self.cy -= if self.cy > 0 { 1 } else { 0 },
+                Key::Right => if let Some(row) = row {
+                    if self.cx < row.len() {
+                        self.cx += 1
+                    }
+                },
+                Key::Left => self.cx -= if self.cx > 0 { 1 } else { 0 },
+                _ => panic!("only call with cursor keys")
+            }
+        }
+
+        if !(self.cy >= self.rows.len()) {
+            let rowlen = self.rows[self.cy].render.len();
+            if self.cx > rowlen{
+                self.cx = rowlen;
+            }
+        };
+
+        self.rx = 0;
+        if self.cy < self.rows.len() {
+            let (cx, cy) = (self.cx, self.cy);
+            self.rx = self.row_cx_to_rx(cy, cx);
+        }
+
+        if self.cy < self.rowoff {
+            self.rowoff = self.cy;
+        }
+        if self.cy >= self.rowoff + self.screenrows as usize {
+            self.rowoff = self.cy - self.screenrows as usize + 1;
+        }
+        if self.rx < self.coloff {
+            self.coloff = self.rx;
+        }
+        if self.rx >= self.coloff + self.screencols as usize {
+            self.coloff = self.rx - self.screencols as usize + 1;
         }
     }
 
 }
 
 fn init_editor() {
+    let args: Vec<String> = env::args().collect();
+    println!("{:?}, {}", args, args.len());
     let stdin = stdin();
     let mut ret = Ok(1);
     {
         let mut editor = Editor::new();
-        editor.read_file("Cargo.toml");
+        if args.len() > 1 {
+            editor.read_file(args[1].clone());
+        } else {
+            editor.read_file("src/main.rs".to_string());
+        }
         editor.clear();
         editor.write("Hey there, how are you");
+        editor.set_status_message("HELP: Ctrl-Q = quit".to_string());
         while let Ok(_) = ret {
             editor.refresh();
             ret = editor.process_keypress();
