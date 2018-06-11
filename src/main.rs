@@ -1,18 +1,17 @@
 extern crate termion;
 
+use std::env;
+use std::fs::File;
+use std::io::{BufRead, BufReader, stdin, Stdin, stdout, Stdout, Write};
+use std::time::SystemTime;
+use termion::{clear, color, cursor, style};
+use termion::event::Key;
+use termion::input::{Keys, TermRead};
 use termion::raw::{IntoRawMode, RawTerminal};
 use termion::screen::AlternateScreen;
-use termion::event::Key;
-use termion::input::{TermRead, Keys};
-use termion::{clear, cursor, color, style};
 use termion::terminal_size;
-use std::fs::File;
 
-use std::io::{Write, stdout, stdin, stderr, Stdout, Stdin, BufReader, BufRead};
-use std::error::Error;
-use std::{process, env};
-use std::time::SystemTime;
-// use std::{thread, time};
+
 const KILO_TAB_STOP:usize = 8;
 const KILO_QUIT_TIMES:u16 = 2;
 struct Row {
@@ -32,16 +31,10 @@ impl Row {
     }
 
     fn update(&mut self) {
-        let mut tabs = 0;
-        for ch in self.chars.chars() {
-            if ch == '\t' {
-                tabs += 1;
-            }
-        }
 
         self.render.clear();
         let mut idx = 0;
-        let mut ch = self.chars.chars();
+        let ch = self.chars.chars();
 
         for character in ch {
             // let character = ch.next().unwrap();
@@ -57,11 +50,10 @@ impl Row {
                 idx += 1;
             }
         }
-        println!("test");
     }
 
     fn insert_char(&mut self, mut at: usize, c: char) {
-        if at < 0 || at > self.chars.len() {
+        if at > self.chars.len() {
             at = self.chars.len();
         }
 
@@ -126,7 +118,7 @@ impl Editor {
     fn read_file(&mut self, filename: String) {
         self.filename = Some(filename.clone());
         let file = File::open(&filename).unwrap();
-        let mut buf_reader = BufReader::new(file);
+        let buf_reader = BufReader::new(file);
 
         let lines = buf_reader.lines();
         for line in lines {
@@ -147,11 +139,17 @@ impl Editor {
         buffer
     }
 
-    fn save(&mut self) {
+    fn save(&mut self, save_as: bool) {
+        if let None = self.filename.clone() {
+            self.filename = self.prompt("Save as: ".to_string());
+        } else if save_as {
+            self.filename = self.prompt("Save as: ".to_string());
+        }
+
         if let Some(filename) = self.filename.clone() {
             let mut file = match File::create(&filename) {
                 Ok(file) => file,
-                Err(err) => {
+                Err(_err) => {
                     self.set_status_message("Can't save, I/O error".to_string());
                     return;
                 }
@@ -206,6 +204,7 @@ impl Editor {
         } else {
             let (cx, cy) = (self.cx, self.cy);
             let next_row = self.rows[self.cy].chars.split_off(cx);
+            self.rows[self.cy].update();
             self.insert_row(cy + 1, next_row);
 
         }
@@ -244,13 +243,13 @@ impl Editor {
         buffer
     }
 
-    fn message_bar(&mut self, mut buffer: String) -> String {
+    fn message_bar(&mut self, buffer: String) -> String {
         if self.status_message.is_some() {
             let (message, time) = self.status_message.clone().unwrap();
             let mut message_len = message.len();
             message_len = if message_len > self.screencols as usize {self.screencols as usize} else {message_len};
             match time.elapsed() {
-                Ok(elapsed) if elapsed.as_secs() < 5 => buffer + &message,
+                Ok(elapsed) if elapsed.as_secs() < 5 => buffer + &message[..message_len],
                 Ok(_) | Err(_) => buffer
             }
         } else {
@@ -260,6 +259,30 @@ impl Editor {
 
     fn set_status_message(&mut self, message: String) {
         self.status_message = Some((message, SystemTime::now()));
+    }
+
+    fn prompt(&mut self, message: String) -> Option<String> {
+        let mut buffer = String::new();
+        loop {
+            self.set_status_message(format!("{}{}", message, buffer));
+            self.refresh();
+            let c = self.stdin.next().unwrap().unwrap();
+            match c {
+                Key::Delete | Key::Backspace => {buffer.pop();()},
+                Key::Esc => {
+                    self.set_status_message("".to_string());
+                    return None;
+                },
+                Key::Char('\n') => {
+                    if buffer.len() != 0 {
+                        self.set_status_message("".to_string());
+                        return Some(buffer);
+                    }
+                },
+                Key::Char(c) => buffer.push(c),
+                _ => (),
+            }
+        }
     }
 
     fn refresh(&mut self) {
@@ -286,10 +309,10 @@ impl Editor {
                 }
             } else {
                 let mut len =
-                    if self.rows[file_row as usize].chars.len() < self.coloff as usize {
+                    if self.rows[file_row as usize].render.len() < self.coloff as usize {
                         0
                     } else {
-                        self.rows[file_row as usize].chars.len() - self.coloff as usize
+                        self.rows[file_row as usize].render.len() - self.coloff as usize
                     };
                 // let mut len = self.erow[file_row as usize].chars.len() - self.coloff;
                 // if len < 0 {len = 0}
@@ -327,7 +350,8 @@ impl Editor {
                     return Err(1)
                 }
             },
-            Key::Ctrl('s') => self.save(),
+            Key::Ctrl('S') => self.save(true),
+            Key::Ctrl('s') => self.save(true),
             Key::Char('\n') => self.insert_newline(),
             Key::Char(ch) => self.insert_char(ch),
             c if c == Key::Backspace || c == Key::Ctrl('h') || c == Key::Delete => {
@@ -377,17 +401,17 @@ impl Editor {
     fn move_cursor(&mut self, key: Key) {
         // let mut rowInput = None;
         {
-            let row = if self.cy >= self.rows.len() {
-                None
+            let row_length = if self.cy >= self.rows.len() {
+                0
             } else {
-                Some(self.rows[self.cy].render.as_str())
+                self.rows[self.cy].chars.len()
             };
 
             match key {
                 Key::Down => self.cy += if self.cy < self.rows.len() { 1 } else { 0 },
                 Key::Up => self.cy -= if self.cy > 0 { 1 } else { 0 },
-                Key::Right => if let Some(row) = row {
-                    if self.cx < row.len() {
+                Key::Right => if row_length > 0 {
+                    if self.cx < row_length {
                         self.cx += 1
                     }
                 },
@@ -397,7 +421,7 @@ impl Editor {
         }
 
         if !(self.cy >= self.rows.len()) {
-            let rowlen = self.rows[self.cy].render.len();
+            let rowlen = self.rows[self.cy].chars.len();
             if self.cx > rowlen{
                 self.cx = rowlen;
             }
@@ -409,14 +433,13 @@ impl Editor {
 fn init_editor() {
     let args: Vec<String> = env::args().collect();
     println!("{:?}, {}", args, args.len());
-    let stdin = stdin();
     let mut ret = Ok(1);
     {
         let mut editor = Editor::new();
         if args.len() > 1 {
             editor.read_file(args[1].clone());
         } else {
-            editor.read_file("test.txt".to_string());
+            // editor.read_file("test.txt".to_string());
         }
         editor.clear();
         editor.write("Hey there, how are you");
@@ -426,7 +449,7 @@ fn init_editor() {
             ret = editor.process_keypress();
         }
     }
-    println!("{:?}", ret);
+
     println!("bye !");
 }
 
