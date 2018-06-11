@@ -27,8 +27,8 @@
       <file leaf-file-name="main.rs" pinned="false" current-in-tab="true">
         <entry file="file://$PROJECT_DIR$/src/main.rs">
           <provider selected="true" editor-type-id="text-editor">
-            <state relative-caret-position="279">
-              <caret line="176" column="8" selection-start-line="176" selection-start-column="8" selection-end-line="176" selection-end-column="8" />
+            <state relative-caret-position="425">
+              <caret line="210" column="9" lean-forward="true" selection-start-line="210" selection-start-column="9" selection-end-line="210" selection-end-column="9" />
             </state>
           </provider>
         </entry>
@@ -52,6 +52,7 @@
   <component name="FindInProjectRecents">
     <findStrings>
       <find>8</find>
+      <find>update</find>
     </findStrings>
   </component>
   <component name="Git.Settings">
@@ -198,15 +199,15 @@
       <workItem from="1528552248936" duration="16145000" />
       <workItem from="1528631909582" duration="3078000" />
       <workItem from="1528638199600" duration="13901000" />
-      <workItem from="1528698892322" duration="12919000" />
+      <workItem from="1528698892322" duration="15674000" />
     </task>
     <servers />
   </component>
   <component name="TimeTrackingManager">
-    <option name="totallyTimeSpent" value="46043000" />
+    <option name="totallyTimeSpent" value="48798000" />
   </component>
   <component name="ToolWindowManager">
-    <frame x="61" y="27" width="1859" height="1053" extended-state="6" />
+    <frame x="61" y="27" width="930" height="1053" extended-state="4" />
     <editor active="true" />
     <layout>
       <window_info anchor="right" id="Palette" order="3" />
@@ -223,7 +224,7 @@
       <window_info active="true" anchor="bottom" id="Terminal" order="7" sideWeight="0.4980695" visible="true" weight="0.3286334" />
       <window_info id="Capture Tool" order="2" />
       <window_info id="Designer" order="2" />
-      <window_info content_ui="combo" id="Project" order="0" visible="true" weight="0.060672916" />
+      <window_info content_ui="combo" id="Project" order="0" visible="true" weight="0.12443439" />
       <window_info anchor="right" id="Database" order="3" />
       <window_info id="Structure" order="1" side_tool="true" weight="0.25" />
       <window_info anchor="right" id="Ant Build" order="1" weight="0.25" />
@@ -334,8 +335,8 @@
     </entry>
     <entry file="file://$PROJECT_DIR$/src/main.rs">
       <provider selected="true" editor-type-id="text-editor">
-        <state relative-caret-position="279">
-          <caret line="176" column="8" selection-start-line="176" selection-start-column="8" selection-end-line="176" selection-end-column="8" />
+        <state relative-caret-position="425">
+          <caret line="210" column="9" lean-forward="true" selection-start-line="210" selection-start-column="9" selection-end-line="210" selection-end-column="9" />
         </state>
       </provider>
     </entry>

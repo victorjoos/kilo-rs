@@ -23,10 +23,12 @@ struct Row {
 impl Row {
     fn new(chars: String) -> Row {
         let render = chars.clone();
-        Row {
+        let mut row = Row {
             chars,
             render
-        }
+        };
+        row.update();
+        row
     }
 
     fn update(&mut self) {
@@ -79,9 +81,6 @@ impl Row {
         self.update();
     }
 
-    fn print(&mut self) {
-        writeln!(stdout(), "len: {}, {}, repr: {}, {}", self.chars.len(), self.render.len(), self.chars, self.render).unwrap();
-    }
 }
 
 struct Editor {
@@ -178,12 +177,40 @@ impl Editor {
 
     fn delete_char(&mut self) {
         if self.cy == self.rows.len() {return}
+        if self.cx == 0 && self.cy == 0 {return}
+
         self.dirty = true;
 
         if self.cx > 0 {
             self.rows[self.cy].delete_char(self.cx - 1);
             self.cx -= 1;
+        } else {
+            self.cx = self.rows[self.cy - 1].chars.len();
+            let previous_row = self.rows.remove(self.cy).chars;
+            self.rows[self.cy - 1].append_string(previous_row);
+            self.cy -= 1;
         }
+    }
+
+    fn insert_row(&mut self, at: usize, s: String) {
+        if at > self.rows.len() {return}
+
+        self.rows.insert(at, Row::new(s));
+    }
+
+    fn insert_newline(&mut self) {
+        self.dirty = true;
+        if self.cx == 0 {
+            let cy = self.cy;
+            self.insert_row(cy, "".to_string());
+        } else {
+            let (cx, cy) = (self.cx, self.cy);
+            let next_row = self.rows[self.cy].chars.split_off(cx);
+            self.insert_row(cy + 1, next_row);
+
+        }
+        self.cy += 1;
+        self.cx = 0;
     }
 
     fn write(&mut self, string: &str) {
@@ -301,7 +328,7 @@ impl Editor {
                 }
             },
             Key::Ctrl('s') => self.save(),
-            Key::Char('\n') => ()/*TODO: Enter */,
+            Key::Char('\n') => self.insert_newline(),
             Key::Char(ch) => self.insert_char(ch),
             c if c == Key::Backspace || c == Key::Ctrl('h') || c == Key::Delete => {
                 if c == Key::Delete {
