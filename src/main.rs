@@ -14,6 +14,7 @@ use std::{process, env};
 use std::time::SystemTime;
 // use std::{thread, time};
 const KILO_TAB_STOP:usize = 8;
+const KILO_QUIT_TIMES:u16 = 2;
 struct Row {
     chars: String,
     render: String,
@@ -57,6 +58,27 @@ impl Row {
         println!("test");
     }
 
+    fn insert_char(&mut self, mut at: usize, c: char) {
+        if at < 0 || at > self.chars.len() {
+            at = self.chars.len();
+        }
+
+        self.chars.insert(at, c);
+        self.update();
+    }
+
+    fn append_string(&mut self, line: String) {
+        self.chars += &line;
+        self.update();
+    }
+
+    fn delete_char(&mut self, at: usize) {
+        if at >= self.chars.len() {return}
+
+        self.chars.remove(at);
+        self.update();
+    }
+
     fn print(&mut self) {
         writeln!(stdout(), "len: {}, {}, repr: {}, {}", self.chars.len(), self.render.len(), self.chars, self.render).unwrap();
     }
@@ -72,6 +94,7 @@ struct Editor {
     screencols: u16,
     rows: Vec<Row>,
     dirty: bool,
+    quit_times: u16,
     filename: Option<String>,
     status_message: Option<(String, SystemTime)>,
     screen: AlternateScreen<RawTerminal<Stdout>>,
@@ -94,6 +117,7 @@ impl Editor {
             rows:Vec::new(),
             screen,
             dirty:false,
+            quit_times: KILO_QUIT_TIMES,
             filename:None,
             status_message: None,
             stdin:stdin().keys(),
@@ -112,9 +136,54 @@ impl Editor {
         }
     }
 
-    fn write_char(&mut self, c: char) {
-        write!(self.screen, "{}", c).unwrap();
-        self.screen.flush().unwrap();
+    fn rows_to_string(&self) -> String {
+        let mut buffer = String::new();
+        /*self.rows.foreach(|row| {
+           buffer += &row.chars
+        });*/
+        for row in &self.rows {
+            buffer += &row.chars;
+            buffer.push('\n');
+        }
+        buffer
+    }
+
+    fn save(&mut self) {
+        if let Some(filename) = self.filename.clone() {
+            let mut file = match File::create(&filename) {
+                Ok(file) => file,
+                Err(err) => {
+                    self.set_status_message("Can't save, I/O error".to_string());
+                    return;
+                }
+            };
+            let buffer = self.rows_to_string();
+            file.write_all(buffer.as_bytes()).expect("Unable to write data");
+            self.dirty = false;
+            self.set_status_message(format!("{} bytes written to disk", buffer.len()));
+        } else {
+            self.set_status_message("Can't save, I/O error".to_string());
+        }
+    }
+
+    fn insert_char(&mut self, c: char) {
+        self.dirty = true;
+        if self.cy == self.rows.len() {
+            self.rows.push(Row::new("".to_string()));
+        }
+        // eprintln!("insert at: {}, {}", self.cx, self.cy);
+        self.rows[self.cy].insert_char(self.cx, c);
+        self.cx += 1;
+    }
+
+    fn delete_char(&mut self) {
+        if self.cy == self.rows.len() {return}
+        self.dirty = true;
+
+        if self.cx > 0 {
+            self.rows[self.cy].delete_char(self.cx - 1);
+            self.cx -= 1;
+        }
     }
 
     fn write(&mut self, string: &str) {
@@ -130,7 +199,8 @@ impl Editor {
     fn statusbar(&mut self, mut buffer: String) -> String {
         buffer.push_str(format!("{}", style::Invert).as_str());
         let filename = self.filename.clone().unwrap_or("[None]".to_string());
-        let status = format!(" {} - {} lines", filename, self.rows.len());
+        let modified = if self.dirty {"(modified)"} else {""};
+        let status = format!(" {} - {} lines {}", filename, self.rows.len(), modified);
         let rstatus = format!("{}/{} ", self.cy+1, self.rows.len());
         let mut status_size = status.len();
         let rstatus_size = rstatus.len();
@@ -209,6 +279,7 @@ impl Editor {
         self.clear();
         buffer = self.statusbar(buffer);
         buffer = self.message_bar(buffer);
+        self.scroll_cursor();
         buffer.push_str(
             format!("{}", cursor::Goto(
                 (self.rx - self.coloff + 1) as u16, (self.cy-self.rowoff+1) as u16)).as_str());
@@ -219,18 +290,35 @@ impl Editor {
     fn process_keypress(&mut self) -> Result<i32, i32> {
         let c = self.stdin.next().unwrap().unwrap();
         match c {
-            Key::Ctrl('q') => return Err(1),
-            Key::Char(ch) => self.write_char(ch),
+            Key::Ctrl('q') => {
+                if self.dirty && self.quit_times > 0 {
+                    let quit = self.quit_times;
+                    self.set_status_message(format!("WARNING!!! file has unsaved changes. Press Ctrl-Q {} more times to quit", quit));
+                    self.quit_times -= 1;
+                    return Ok(1)
+                } else {
+                    return Err(1)
+                }
+            },
+            Key::Ctrl('s') => self.save(),
+            Key::Char('\n') => ()/*TODO: Enter */,
+            Key::Char(ch) => self.insert_char(ch),
+            c if c == Key::Backspace || c == Key::Ctrl('h') || c == Key::Delete => {
+                if c == Key::Delete {
+                    self.move_cursor(Key::Right);
+                }
+                self.delete_char()
+            },
             Key::Up | Key::Down | Key::Left | Key::Right => self.move_cursor(c),
             _ => {}
         }
+        self.quit_times = KILO_QUIT_TIMES;
         return Ok(0)
     }
 
     fn row_cx_to_rx(&mut self, row: usize, cx: usize) -> usize {
         let mut rx = 0;
-        self.rows[row].chars.chars();
-        for j in self.rows[row].chars.chars().take(self.cx) {
+        for j in self.rows[row].chars.chars().take(cx) {
             if j == '\t' {
                 rx += (KILO_TAB_STOP - 1) - (rx % KILO_TAB_STOP);
             }
@@ -239,6 +327,26 @@ impl Editor {
         return rx;
     }
 
+    fn scroll_cursor(&mut self) {
+        self.rx = 0;
+        if self.cy < self.rows.len() {
+            let (cx, cy) = (self.cx, self.cy);
+            self.rx = self.row_cx_to_rx(cy, cx);
+        }
+
+        if self.cy < self.rowoff {
+            self.rowoff = self.cy;
+        }
+        if self.cy >= self.rowoff + self.screenrows as usize {
+            self.rowoff = self.cy - self.screenrows as usize + 1;
+        }
+        if self.rx < self.coloff {
+            self.coloff = self.rx;
+        }
+        if self.rx >= self.coloff + self.screencols as usize {
+            self.coloff = self.rx - self.screencols as usize + 1;
+        }
+    }
     fn move_cursor(&mut self, key: Key) {
         // let mut rowInput = None;
         {
@@ -267,25 +375,6 @@ impl Editor {
                 self.cx = rowlen;
             }
         };
-
-        self.rx = 0;
-        if self.cy < self.rows.len() {
-            let (cx, cy) = (self.cx, self.cy);
-            self.rx = self.row_cx_to_rx(cy, cx);
-        }
-
-        if self.cy < self.rowoff {
-            self.rowoff = self.cy;
-        }
-        if self.cy >= self.rowoff + self.screenrows as usize {
-            self.rowoff = self.cy - self.screenrows as usize + 1;
-        }
-        if self.rx < self.coloff {
-            self.coloff = self.rx;
-        }
-        if self.rx >= self.coloff + self.screencols as usize {
-            self.coloff = self.rx - self.screencols as usize + 1;
-        }
     }
 
 }
@@ -300,11 +389,11 @@ fn init_editor() {
         if args.len() > 1 {
             editor.read_file(args[1].clone());
         } else {
-            editor.read_file("src/main.rs".to_string());
+            editor.read_file("test.txt".to_string());
         }
         editor.clear();
         editor.write("Hey there, how are you");
-        editor.set_status_message("HELP: Ctrl-Q = quit".to_string());
+        editor.set_status_message("HELP: Ctrl-S = save | Ctrl-Q = quit".to_string());
         while let Ok(_) = ret {
             editor.refresh();
             ret = editor.process_keypress();
