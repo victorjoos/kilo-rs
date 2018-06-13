@@ -15,6 +15,7 @@ use std::error::Error;
 
 
 const KILO_TAB_STOP:usize = 8;
+const KILO_TAB_SPACES:usize = 4;
 const KILO_QUIT_TIMES:u16 = 2;
 
 enum Mode {
@@ -167,11 +168,26 @@ impl Row {
         self.update();
     }
 
-    fn delete_char(&mut self, at: usize) {
-        if at >= self.chars.len() {return}
-
-        self.chars.remove(at);
+    fn delete_char(&mut self, at: usize) -> usize {
+        if at >= self.chars.len() {return 0}
+        let spaces = KILO_TAB_SPACES;
+        let deleted: usize;
+        if spaces < at {
+            eprintln!("{}", &self.chars[at-spaces..at])
+        } else {
+            eprintln!("{}", at)
+        }
+        if at+1 >= spaces && &self.chars[at+1-spaces..at+1]=="    " {
+            for i in at+1-spaces..at+1 {
+                self.chars.remove(at+1-spaces);
+            }
+            deleted = spaces;
+        } else {
+            self.chars.remove(at);
+            deleted = 1;
+        }
         self.update();
+        return deleted;
     }
 
 }
@@ -288,8 +304,8 @@ impl Editor {
         self.dirty = true;
 
         if self.cx > 0 {
-            self.rows[self.cy].delete_char(self.cx - 1);
-            self.cx -= 1;
+            let deleted = self.rows[self.cy].delete_char(self.cx - 1);
+            self.cx -= deleted;
         } else {
             self.cx = self.rows[self.cy - 1].chars.len();
             let previous_row = self.rows.remove(self.cy).chars;
@@ -456,8 +472,9 @@ impl Editor {
             },
             Key::Ctrl('s') => self.save(false),
             Key::Char('\n') => self.insert_newline(),
+            Key::Char('\t') => for _ in 0..KILO_TAB_SPACES {self.insert_char(' ')},
             Key::Char(ch) => self.insert_char(ch),
-            c @ Key::Backspace | c @ Key::Ctrl('h') | c @ Key::Delete => {
+            Key::Backspace | Key::Ctrl('h') | Key::Delete => {
                 if c == Key::Delete {
                     self.move_cursor(Key::Right);
                 }
