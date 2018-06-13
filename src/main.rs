@@ -537,20 +537,16 @@ impl Editor {
 fn init_editor() {
     let args: Vec<String> = env::args().collect();
     let mut ret = Ok(1);
-    {
-        let mut editor = Editor::new();
-        editor.set_status_message("HELP: Ctrl-S = save | Ctrl-Q = quit".to_string());
-        if args.len() > 1 {
-            editor.read_file(args[1].clone());
-        }
-
-        while let Ok(_) = ret {
-            editor.draw();
-            ret = editor.process_keypress();
-        }
+    let mut editor = Editor::new();
+    editor.set_status_message("HELP: Ctrl-S = save | Ctrl-Q = quit".to_string());
+    if args.len() > 1 {
+        editor.read_file(args[1].clone());
     }
 
-    println!("bye !");
+    while let Ok(_) = ret {
+        editor.draw();
+        ret = editor.process_keypress();
+    }
 }
 
 fn main() {
