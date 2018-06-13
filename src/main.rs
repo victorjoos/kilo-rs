@@ -10,13 +10,86 @@ use termion::input::{Keys, TermRead};
 use termion::raw::{IntoRawMode, RawTerminal};
 use termion::screen::AlternateScreen;
 use termion::terminal_size;
+use std::fmt;
+use std::error::Error;
 
 
 const KILO_TAB_STOP:usize = 8;
 const KILO_QUIT_TIMES:u16 = 2;
+
+enum Mode {
+    Normal,
+    Insert,
+    Visual,
+}
+
+
+
+impl Mode {
+    fn process_keypress(&mut self, editor:&mut Editor, c: Key) {
+        match self {
+            Mode::Insert => self.insert(editor, c),
+            Mode::Normal => self.normal(editor, c),
+            Mode::Visual => self.visual(editor, c),
+        }
+    }
+
+    fn normal(&mut self, editor:&mut Editor, c: Key) {
+        match c {
+            Key::Char('i') => {},
+            _ => {}
+        }
+    }
+
+    fn insert(&mut self, editor:&mut Editor, c: Key) {
+        match c {
+            Key::Esc => {},
+            Key::Ctrl('q') => {},
+            Key::Ctrl('s') => {},
+            Key::Char('\n') => {},
+            Key::Char(ch) => {},
+            c @ Key::Backspace | c @ Key::Ctrl('h') | c @ Key::Delete => {},
+            Key::Up | Key::Down | Key::Left | Key::Right => {},
+            _ => {}
+        }
+    }
+
+    fn visual(&mut self, editor:&mut Editor, c: Key) {
+
+    }
+}
+
+impl fmt::Display for Mode {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let (color, string) = match *self {
+            Mode::Normal => (&color::Yellow as &color::Color , "Normal"),
+            Mode::Insert => (&color::Blue as &color::Color, "Insert"),
+            Mode::Visual => (&color::Red as &color::Color, "Visual"),
+        };
+        write!(f, "{}{} {}", color::Fg(color), string, color::Fg(color::Reset))
+    }
+}
+
+#[derive(PartialEq)]
+#[derive(Copy, Clone)]
+enum Highlight {
+    Normal,
+    Number,
+}
+
+impl Highlight {
+    fn to_color(& self) -> color::Fg<&color::Color> {
+        match self {
+            &Highlight::Normal => color::Fg(&color::Reset),
+            &Highlight::Number => color::Fg(&color::Red),
+        }
+    }
+}
+
 struct Row {
     chars: String,
     render: String,
+    highlight: Vec<Highlight>,
 }
 
 impl Row {
@@ -24,7 +97,8 @@ impl Row {
         let render = chars.clone();
         let mut row = Row {
             chars,
-            render
+            render,
+            highlight: Vec::new(),
         };
         row.update();
         row
@@ -34,9 +108,8 @@ impl Row {
 
         self.render.clear();
         let mut idx = 0;
-        let ch = self.chars.chars();
 
-        for character in ch {
+        for character in self.chars.chars() {
             // let character = ch.next().unwrap();
             if character == '\t' {
                 self.render.push(' ');
@@ -50,6 +123,34 @@ impl Row {
                 idx += 1;
             }
         }
+        self.update_syntax()
+    }
+
+    fn update_syntax(&mut self) {
+        self.highlight.clear();
+        for character in self.render.chars() {
+            if character.is_digit(10) {
+                self.highlight.push(Highlight::Number)
+            } else {
+                self.highlight.push(Highlight::Normal)
+            }
+        }
+
+    }
+
+    fn draw(&mut self, mut buffer: String, coloff: usize, len: usize) -> String {
+        let mut current = Highlight::Normal;
+        for (character, highlight) in self.render.chars().zip(self.highlight.clone()).skip(coloff).take(len) {
+            match highlight {
+                hl if hl == current => buffer.push(character),
+                hl => {
+                    buffer.push_str(format!("{}{}", hl.to_color(), character).as_str());
+                    current = hl
+                }
+            }
+        }
+        buffer.push_str(format!("{}", Highlight::Normal.to_color()).as_str());
+        buffer
     }
 
     fn insert_char(&mut self, mut at: usize, c: char) {
@@ -84,6 +185,7 @@ struct Editor {
     screenrows: u16,
     screencols: u16,
     rows: Vec<Row>,
+    mode: Mode,
     dirty: bool,
     quit_times: u16,
     filename: Option<String>,
@@ -106,6 +208,7 @@ impl Editor {
             screenrows:screenrows-2,
             screencols,
             rows:Vec::new(),
+            mode:Mode::Insert,
             screen,
             dirty:false,
             quit_times: KILO_QUIT_TIMES,
@@ -117,7 +220,12 @@ impl Editor {
 
     fn read_file(&mut self, filename: String) {
         self.filename = Some(filename.clone());
-        let file = File::open(&filename).unwrap();
+        let file = File::open(&filename);
+        if let Err(err) = file {
+            self.set_status_message(format!("{} [New file]", filename));
+            return
+        }
+        let file = file.unwrap();
         let buf_reader = BufReader::new(file);
 
         let lines = buf_reader.lines();
@@ -157,9 +265,9 @@ impl Editor {
             let buffer = self.rows_to_string();
             file.write_all(buffer.as_bytes()).expect("Unable to write data");
             self.dirty = false;
-            self.set_status_message(format!("{} bytes written to disk", buffer.len()));
+            self.set_status_message(format!("{} bytes written in \"{}\"", buffer.len(), filename));
         } else {
-            self.set_status_message("Can't save, I/O error".to_string());
+            self.set_status_message("Not saved :(".to_string());
         }
     }
 
@@ -213,27 +321,22 @@ impl Editor {
     }
 
     fn write(&mut self, string: &str) {
-        write!(self.screen, "{}", string).unwrap();
+        write!(self.screen, "{}{}{}",clear::All, cursor::Goto(1,1), string).unwrap();
         self.screen.flush().unwrap();
     }
 
-    fn clear(&mut self) {
-        write!(self.screen, "{}{}", clear::All, cursor::Goto(1,1)).unwrap();
-        self.screen.flush().unwrap();
-    }
-
-    fn statusbar(&mut self, mut buffer: String) -> String {
+    fn status_bar(&mut self, mut buffer: String) -> String {
         buffer.push_str(format!("{}", style::Invert).as_str());
         let filename = self.filename.clone().unwrap_or("[None]".to_string());
         let modified = if self.dirty {"(modified)"} else {""};
-        let status = format!(" {} - {} lines {}", filename, self.rows.len(), modified);
+        let status = format!("{} {} - {} lines {}", self.mode, filename, self.rows.len(), modified);
         let rstatus = format!("{}/{} ", self.cy+1, self.rows.len());
         let mut status_size = status.len();
         let rstatus_size = rstatus.len();
         status_size = if status_size as u16 > self.screencols {self.screencols as usize} else {status_size};
         buffer = buffer + &status[..status_size];
 
-        for _ in 0..self.screencols as i16-status_size as i16 - rstatus_size as i16 {
+        for _ in 0..self.screencols as i16-status_size as i16 - rstatus_size as i16 + 14 {
             buffer.push(' ');
         }
         if self.screencols as i16 - status_size as i16 - rstatus_size as i16 >= 0 {
@@ -265,7 +368,7 @@ impl Editor {
         let mut buffer = String::new();
         loop {
             self.set_status_message(format!("{}{}", message, buffer));
-            self.refresh();
+            self.draw();
             let c = self.stdin.next().unwrap().unwrap();
             match c {
                 Key::Delete | Key::Backspace => {buffer.pop();()},
@@ -285,8 +388,8 @@ impl Editor {
         }
     }
 
-    fn refresh(&mut self) {
-        let mut buffer = String::new();
+    fn draw(&mut self) {
+        let mut buffer = String::with_capacity(((self.screencols) * self.screenrows) as usize);
         for y in 0..self.screenrows as usize {
             let file_row = y + self.rowoff;
             if file_row >= self.rows.len() {
@@ -314,25 +417,26 @@ impl Editor {
                     } else {
                         self.rows[file_row as usize].render.len() - self.coloff as usize
                     };
-                // let mut len = self.erow[file_row as usize].chars.len() - self.coloff;
-                // if len < 0 {len = 0}
+
                 if len > self.screencols as usize {len = self.screencols as usize}
-                eprintln!("coloff: {}, len: {}", self.coloff, len);
                 if len > 0 {
-                    let render = &self.rows[file_row as usize]
-                        .render[self.coloff as usize..(self.coloff as usize + len) as usize];
-                    buffer.push_str(render);
+                    buffer = self.rows[file_row].draw(buffer, self.coloff, len);
+                    // let len_diff = self.rows[file_row].render_hl.len() - self.rows[file_row].render.len();
+                    // eprintln!("len_diff: {}", len_diff);
+                    // let render = &self.rows[file_row]
+                    //     .render_hl[self.coloff as usize..(self.coloff as usize + len + len_diff) as usize];
+                    // buffer.push_str(render); // &self.rows[file_row].render_hl);
                 }
             }
             buffer.push_str("\r\n");
         }
-        self.clear();
-        buffer = self.statusbar(buffer);
+        buffer = self.status_bar(buffer);
         buffer = self.message_bar(buffer);
         self.scroll_cursor();
         buffer.push_str(
             format!("{}", cursor::Goto(
                 (self.rx - self.coloff + 1) as u16, (self.cy-self.rowoff+1) as u16)).as_str());
+
         self.write(buffer.as_str());
         // eprintln!("cursor: {}, {}", self.cx, self.cy);
     }
@@ -350,11 +454,10 @@ impl Editor {
                     return Err(1)
                 }
             },
-            Key::Ctrl('S') => self.save(true),
-            Key::Ctrl('s') => self.save(true),
+            Key::Ctrl('s') => self.save(false),
             Key::Char('\n') => self.insert_newline(),
             Key::Char(ch) => self.insert_char(ch),
-            c if c == Key::Backspace || c == Key::Ctrl('h') || c == Key::Delete => {
+            c @ Key::Backspace | c @ Key::Ctrl('h') | c @ Key::Delete => {
                 if c == Key::Delete {
                     self.move_cursor(Key::Right);
                 }
@@ -398,6 +501,7 @@ impl Editor {
             self.coloff = self.rx - self.screencols as usize + 1;
         }
     }
+
     fn move_cursor(&mut self, key: Key) {
         // let mut rowInput = None;
         {
@@ -432,20 +536,16 @@ impl Editor {
 
 fn init_editor() {
     let args: Vec<String> = env::args().collect();
-    println!("{:?}, {}", args, args.len());
     let mut ret = Ok(1);
     {
         let mut editor = Editor::new();
+        editor.set_status_message("HELP: Ctrl-S = save | Ctrl-Q = quit".to_string());
         if args.len() > 1 {
             editor.read_file(args[1].clone());
-        } else {
-            // editor.read_file("test.txt".to_string());
         }
-        editor.clear();
-        editor.write("Hey there, how are you");
-        editor.set_status_message("HELP: Ctrl-S = save | Ctrl-Q = quit".to_string());
+
         while let Ok(_) = ret {
-            editor.refresh();
+            editor.draw();
             ret = editor.process_keypress();
         }
     }
