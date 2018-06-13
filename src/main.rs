@@ -172,11 +172,6 @@ impl Row {
         if at >= self.chars.len() {return 0}
         let spaces = KILO_TAB_SPACES;
         let deleted: usize;
-        if spaces < at {
-            eprintln!("{}", &self.chars[at-spaces..at])
-        } else {
-            eprintln!("{}", at)
-        }
         if at+1 >= spaces && &self.chars[at+1-spaces..at+1]=="    " {
             for i in at+1-spaces..at+1 {
                 self.chars.remove(at+1-spaces);
