@@ -1,8 +1,15 @@
+#[macro_use] extern crate lazy_static;
+#[macro_use] extern crate serde_derive;
 extern crate termion;
+extern crate regex;
+extern crate toml;
 
 use std::env;
 use std::fs::File;
+use std::io;
+use std::io::prelude::*;
 use std::io::{BufRead, BufReader, stdin, Stdin, stdout, Stdout, Write};
+use std::rc::Rc;
 use std::time::SystemTime;
 use termion::{clear, color, cursor, style};
 use termion::event::Key;
@@ -12,7 +19,9 @@ use termion::screen::AlternateScreen;
 use termion::terminal_size;
 use std::fmt;
 use std::error::Error;
-
+use regex::Regex;
+use toml::value::{Value, Table};
+use std::collections::HashMap;
 
 const KILO_TAB_STOP:usize = 8;
 const KILO_TAB_SPACES:usize = 4;
@@ -71,11 +80,66 @@ impl fmt::Display for Mode {
     }
 }
 
+#[derive(Debug, Deserialize, Clone)]
+struct Syntax {
+    filetype: String,
+    filenames: Vec<String>,
+    keywords: Vec<String>,
+    important_keywords: String,
+    types: Vec<String>,
+    numbers: String,
+    comments:String
+}
+
+impl Syntax {
+    fn new() -> Syntax {
+        Syntax {
+            filetype: "".to_string(),
+            filenames: vec!(),
+            keywords: vec!(),
+            important_keywords: "".to_string(),
+            types: vec!(),
+            numbers: "".to_string(),
+            comments: "".to_string(),
+        }
+    }
+}
+
+struct SyntaxRe {
+    numbers: Option<Regex>,
+    keywords: Option<Regex>,
+}
+
+impl SyntaxRe {
+    fn new(syntax: &Syntax) -> SyntaxRe {
+        let numbers = if &syntax.numbers == "" {
+            None
+        } else {
+            Some(Regex::new(&syntax.numbers).unwrap())
+        };
+        let keywords = if syntax.keywords.len()>0 {
+            let mut all = syntax.keywords.join("|");
+            all.insert_str(0, r"\b(");
+            all.push_str(r")\b");
+            Some(Regex::new(&all).unwrap())
+        } else {
+            None
+        };
+        SyntaxRe {
+            numbers,
+            keywords,
+        }
+    }
+}
+
 #[derive(PartialEq)]
 #[derive(Copy, Clone)]
 enum Highlight {
     Normal,
     Number,
+    Type,
+    Keyword,
+    Match,
 }
 
 impl Highlight {
@@ -83,6 +147,17 @@ impl Highlight {
         match self {
             &Highlight::Normal => color::Fg(&color::Reset),
             &Highlight::Number => color::Fg(&color::Red),
+            &Highlight::Type => color::Fg(&color::Yellow),
+            &Highlight::Keyword => color::Fg(&color::Magenta),
+            &Highlight::Match => color::Fg(&color::Black),
+        }
+    }
+
+    fn to_background(& self) -> color::Bg<&color::Color> {
+        match self {
+            &Highlight::Normal => color::Bg(&color::Reset),
+            &Highlight::Match => color::Bg(&color::Yellow),
+            _ => color::Bg(&color::Reset),
         }
     }
 }
@@ -91,18 +166,24 @@ struct Row {
     chars: String,
     render: String,
     highlight: Vec<Highlight>,
+    syntax: Rc<SyntaxRe>
 }
 
 impl Row {
-    fn new(chars: String) -> Row {
+    fn new(chars: String, syntax: Rc<SyntaxRe>) -> Row {
         let render = chars.clone();
         let mut row = Row {
             chars,
             render,
             highlight: Vec::new(),
+            syntax,
         };
         row.update();
         row
+    }
+
+    fn add_syntax(&mut self, syntax: Rc<SyntaxRe>) {
+        self.syntax = syntax;
     }
 
     fn update(&mut self) {
@@ -128,15 +209,37 @@ impl Row {
     }
 
     fn update_syntax(&mut self) {
+        lazy_static! {
+            static ref TYPE: Regex = Regex::new(r"[^:]:\s?(&?\w+)").unwrap();
+            static ref KEYWORD: Regex = Regex::new(r"\b(in|fn|match|if|else|for|loop|while|let|impl|use)\b").unwrap();
+        }
         self.highlight.clear();
-        for character in self.render.chars() {
-            if character.is_digit(10) {
-                self.highlight.push(Highlight::Number)
-            } else {
-                self.highlight.push(Highlight::Normal)
+        self.highlight.resize(self.render.len(), Highlight::Normal);
+        
+        if let Some(number_re) = &self.syntax.numbers {
+            for capture in number_re.captures_iter(&self.render) {
+                let mat = capture.get(1).unwrap();
+                for hl in mat.start()..mat.end() {
+                    self.highlight[hl] = Highlight::Number;
+                }
             }
         }
 
+        for capture in TYPE.captures_iter(&self.render) {
+            let mat = capture.get(1).unwrap();
+            for hl in mat.start()..mat.end() {
+                self.highlight[hl] = Highlight::Type;
+            }
+        }
+
+        if let Some(keyword_re) = &self.syntax.keywords {
+            for capture in keyword_re.captures_iter(&self.render) {
+                let mat = capture.get(1).unwrap();
+                for hl in mat.start()..mat.end() {
+                    self.highlight[hl] = Highlight::Keyword;
+                }
+            }
+        }
     }
 
     fn draw(&mut self, mut buffer: String, coloff: usize, len: usize) -> String {
@@ -145,12 +248,12 @@ impl Row {
             match highlight {
                 hl if hl == current => buffer.push(character),
                 hl => {
-                    buffer.push_str(format!("{}{}", hl.to_color(), character).as_str());
+                    buffer.push_str(format!("{}{}{}", hl.to_color(), hl.to_background(), character).as_str());
                     current = hl
                 }
             }
         }
-        buffer.push_str(format!("{}", Highlight::Normal.to_color()).as_str());
+        buffer.push_str(format!("{}{}", Highlight::Normal.to_color(), Highlight::Normal.to_background()).as_str());
         buffer
     }
 
@@ -200,6 +303,8 @@ struct Editor {
     dirty: bool,
     quit_times: u16,
     filename: Option<String>,
+    syntax: Rc<Syntax>,
+    syntax_re: Rc<SyntaxRe>,
     status_message: Option<(String, SystemTime)>,
     screen: AlternateScreen<RawTerminal<Stdout>>,
     stdin: Keys<Stdin>,
@@ -210,6 +315,7 @@ impl Editor {
         let stdout = stdout().into_raw_mode().unwrap();
         let screen = AlternateScreen::from(stdout);
         let (screencols, screenrows) = terminal_size().unwrap();
+        let syntax = Syntax::new();
         Editor {
             cx:0,
             cy:0,
@@ -224,6 +330,8 @@ impl Editor {
             dirty:false,
             quit_times: KILO_QUIT_TIMES,
             filename:None,
+            syntax:Rc::new(syntax.clone()),
+            syntax_re:Rc::new(SyntaxRe::new(&syntax)),
             status_message: None,
             stdin:stdin().keys(),
         }
@@ -231,6 +339,9 @@ impl Editor {
 
     fn read_file(&mut self, filename: String) {
         self.filename = Some(filename.clone());
+        let syntax = Editor::get_syntax(&filename);
+        self.syntax = Rc::clone(&syntax);
+        self.syntax_re = Rc::new(SyntaxRe::new(&syntax));
         let file = File::open(&filename);
         if let Err(err) = file {
             self.set_status_message(format!("{} [New file]", filename));
@@ -240,10 +351,34 @@ impl Editor {
         let buf_reader = BufReader::new(file);
 
         let lines = buf_reader.lines();
+        // let syntax = Rc::clone(&self.syntax);
         for line in lines {
             let line = line.unwrap();
-            self.rows.push(Row::new(line));
+            let s = Rc::clone(&self.syntax_re);
+            self.rows.push(Row::new(line, s));
         }
+    }
+
+    fn get_syntax(filename: &str) -> Rc<Syntax> {
+        let mut f = File::open("syntax.toml");
+        let mut contents = String::new();
+        if let Ok(mut f) = f {
+            f.read_to_string(&mut contents).unwrap();
+        } else {
+            contents = String::from_utf8_lossy(include_bytes!("syntax.toml")).to_string();
+        }
+        let value = contents.parse::<Value>().unwrap();
+        if let Some(value) = value.get("syntax") {
+            for syntax in value.as_array().unwrap() {
+                let s = syntax.clone().try_into::<Syntax>().unwrap();
+                for ending in s.filenames.clone() {
+                    if filename.ends_with(&ending) {
+                        return Rc::new(s);
+                    }
+                }
+            }
+        }
+        return Rc::new(Syntax::new());
     }
 
     fn rows_to_string(&self) -> String {
@@ -260,9 +395,9 @@ impl Editor {
 
     fn save(&mut self, save_as: bool) {
         if let None = self.filename.clone() {
-            self.filename = self.prompt("Save as: ".to_string());
+            self.filename = self.prompt("Save as: ".to_string(), None);
         } else if save_as {
-            self.filename = self.prompt("Save as: ".to_string());
+            self.filename = self.prompt("Save as: ".to_string(), None);
         }
 
         if let Some(filename) = self.filename.clone() {
@@ -282,10 +417,63 @@ impl Editor {
         }
     }
 
+    fn find_callback(editor: &mut Self, query: &str, key: Key) {
+        let mut direction: isize = 1;
+        if key == Key::Char('\n') || key == Key::Esc {
+            return;
+        } else if key == Key::Down {
+            direction = 1;
+        } else if key == Key::Up {
+            direction = -1;
+        } else {
+            direction = 1;
+        }
+        if query != "" {
+            let mut current = editor.cy;
+            for i in 0..editor.rows.len() {
+                if current == 0 && direction == -1 {current = editor.rows.len();}
+                current = (current as isize + direction) as usize;
+                if current == editor.rows.len() {current = 0;}
+                eprintln!("{}", current);
+                if let Some(index) = editor.rows[current].chars.find(&query) {
+                    editor.cy = current;
+                    editor.cx = index;
+                    editor.rowoff = editor.rows.len();
+
+                    /*if let Some(index) = editor.rows[current].render.find(&query) {
+                        for j in index..index+&query.len() {
+                            editor.rows[current].highlight[j] = Highlight::Match;
+                        }
+                    }*/
+                    break;
+                }
+            }
+        }
+    }
+
+    fn find(&mut self) {
+        let saved_cx = self.cx;
+        let saved_cy = self.cy;
+        let saved_coloff = self.coloff;
+        let saved_rowoff = self.rowoff;
+        self.screencols = self.screencols/2;
+
+        let query  = self.prompt("Search: ".to_string(), Some(Editor::find_callback));
+
+        self.screencols = self.screencols*2;
+
+        if query == None {
+            self.cx = saved_cx;
+            self.cy = saved_cy;
+            self.coloff = saved_coloff;
+            self.rowoff = saved_rowoff;
+        }
+    }
+
     fn insert_char(&mut self, c: char) {
         self.dirty = true;
         if self.cy == self.rows.len() {
-            self.rows.push(Row::new("".to_string()));
+            self.rows.push(Row::new("".to_string(), Rc::clone(&self.syntax_re)));
         }
         // eprintln!("insert at: {}, {}", self.cx, self.cy);
         self.rows[self.cy].insert_char(self.cx, c);
@@ -312,7 +500,8 @@ impl Editor {
     fn insert_row(&mut self, at: usize, s: String) {
         if at > self.rows.len() {return}
 
-        self.rows.insert(at, Row::new(s));
+        let row= Row::new(s, Rc::clone(&self.syntax_re));
+        self.rows.insert(at, row);
     }
 
     fn insert_newline(&mut self) {
@@ -341,7 +530,7 @@ impl Editor {
         let filename = self.filename.clone().unwrap_or("[None]".to_string());
         let modified = if self.dirty {"(modified)"} else {""};
         let status = format!("{} {} - {} lines {}", self.mode, filename, self.rows.len(), modified);
-        let rstatus = format!("{}/{} ", self.cy+1, self.rows.len());
+        let rstatus = format!("[{}] {}/{} ", self.syntax.filetype, self.cy+1, self.rows.len());
         let mut status_size = status.len();
         let rstatus_size = rstatus.len();
         status_size = if status_size as u16 > self.screencols {self.screencols as usize} else {status_size};
@@ -375,7 +564,7 @@ impl Editor {
         self.status_message = Some((message, SystemTime::now()));
     }
 
-    fn prompt(&mut self, message: String) -> Option<String> {
+    fn prompt(&mut self, message: String, callback: Option<fn(&mut Self, &str, Key)>) -> Option<String> {
         let mut buffer = String::new();
         loop {
             self.set_status_message(format!("{}{}", message, buffer));
@@ -385,22 +574,32 @@ impl Editor {
                 Key::Delete | Key::Backspace => {buffer.pop();()},
                 Key::Esc => {
                     self.set_status_message("".to_string());
+                    if let Some(callback) = callback {
+                        callback(self, &buffer, c);
+                    }
                     return None;
                 },
                 Key::Char('\n') => {
                     if buffer.len() != 0 {
                         self.set_status_message("".to_string());
+                        if let Some(callback) = callback {
+                            callback(self, &buffer, c);
+                        }
                         return Some(buffer);
                     }
                 },
                 Key::Char(c) => buffer.push(c),
                 _ => (),
             }
+            if let Some(callback) = callback {
+                callback(self, &buffer, c);
+            }
         }
     }
 
     fn draw(&mut self) {
         let mut buffer = String::with_capacity(((self.screencols) * self.screenrows) as usize);
+        self.scroll_cursor();
         for y in 0..self.screenrows as usize {
             let file_row = y + self.rowoff;
             if file_row >= self.rows.len() {
@@ -443,7 +642,6 @@ impl Editor {
         }
         buffer = self.status_bar(buffer);
         buffer = self.message_bar(buffer);
-        self.scroll_cursor();
         buffer.push_str(
             format!("{}", cursor::Goto(
                 (self.rx - self.coloff + 1) as u16, (self.cy-self.rowoff+1) as u16)).as_str());
@@ -466,6 +664,7 @@ impl Editor {
                 }
             },
             Key::Ctrl('s') => self.save(false),
+            Key::Ctrl('f') => self.find(),
             Key::Char('\n') => self.insert_newline(),
             Key::Char('\t') => for _ in 0..KILO_TAB_SPACES {self.insert_char(' ')},
             Key::Char(ch) => self.insert_char(ch),
@@ -550,7 +749,7 @@ fn init_editor() {
     let args: Vec<String> = env::args().collect();
     let mut ret = Ok(1);
     let mut editor = Editor::new();
-    editor.set_status_message("HELP: Ctrl-S = save | Ctrl-Q = quit".to_string());
+    editor.set_status_message("HELP: Ctrl-S = save | Ctrl-F = find | Ctrl-Q = quit".to_string());
     if args.len() > 1 {
         editor.read_file(args[1].clone());
     }
@@ -561,7 +760,16 @@ fn init_editor() {
     }
 }
 
-fn main() {
+#[derive(Debug, Deserialize)]
+struct FileMatch {
+    filenames: Vec<String>,
+    keywords: Vec<String>,
+    important_keywords: String,
+    comments: Vec<String>,
+    numbers: String,
+}
+
+fn main() -> io::Result<()> {
     init_editor();
-    return;
+    return Ok(());
 }

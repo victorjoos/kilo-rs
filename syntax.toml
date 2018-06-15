@@ -1,0 +1,27 @@
+[[syntax]]
+filetype="rust"
+filenames=["rust", "rs"]
+keywords=["const|in|match|if|else|for|loop|while|let|impl|use",
+          "fn|extern|crate|enum|struct"]
+important_keywords="self"
+types=["mut|char|u8|i8|u16|i16|u32|i32|u64|i64|usize",
+       "String|Vec|HashMap|Option|Result|Some|None|Err|Ok",
+       "true|false"]
+comments='//.*'
+numbers='\b(\d+\.?\d*|self)\b'
+[[syntax]]
+filetype="c"
+filenames=["c", "cpp", "c++"]
+keywords=[]
+important_keywords=""
+types=[]
+comments='//.*'
+numbers='\b(\d+\.?\d*|self)\b'
+[[syntax]]
+filetype="python"
+filenames=["python", "py"]
+keywords=[]
+important_keywords=""
+types=[]
+comments='#.*'
+numbers='\b(\d+\.?\d*|self)\b'
